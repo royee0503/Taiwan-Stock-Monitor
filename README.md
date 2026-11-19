@@ -155,7 +155,8 @@ pythonw .\\Stock_windows\\Taiwan_Stock_Monitor.py --minimized
 
 ```powershell
 python -m pip install pyinstaller
-python -m PyInstaller --noconfirm --clean --onefile --windowed --name StockMonitor --hidden-import openpyxl Python_Stock_Monitor.py
+cd Stock_windows
+python -m PyInstaller --noconfirm --clean --onefile --windowed --name StockMonitor --hidden-import openpyxl Taiwan_Stock_Monitor.py
 ```
 
 打包完成後，執行檔位於 `dist\StockMonitor.exe`。如果有圖示檔，可以加上 `--icon stock_monitor.ico`。

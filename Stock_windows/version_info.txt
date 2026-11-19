@@ -1,0 +1,29 @@
+# Windows 執行檔的「內容 → 詳細資料」資訊（PyInstaller --version-file 使用）
+# 改版時只要改 filevers / prodvers 和下面的 FileVersion / ProductVersion
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=(0, 18, 0, 0),
+    prodvers=(0, 18, 0, 0),
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0)
+  ),
+  kids=[
+    StringFileInfo([
+      StringTable(
+        '040404B0',
+        [StringStruct('CompanyName', 'royee0503'),
+         StringStruct('FileDescription', 'Taiwan Stock Monitor'),
+         StringStruct('FileVersion', '0.18.0.0'),
+         StringStruct('InternalName', 'StockMonitor'),
+         StringStruct('LegalCopyright', 'AGPL-3.0 License'),
+         StringStruct('OriginalFilename', 'StockMonitor.exe'),
+         StringStruct('ProductName', 'Taiwan Stock Monitor'),
+         StringStruct('ProductVersion', '0.18.0.0')])
+    ]),
+    VarFileInfo([VarStruct('Translation', [1028, 1200])])
+  ]
+)

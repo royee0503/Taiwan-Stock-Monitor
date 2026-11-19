@@ -23,7 +23,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QGridLayout, QFormLayout, QTableWidget,
     QTableWidgetItem, QHeaderView, QLineEdit, QComboBox, QDialog,
     QDoubleSpinBox, QSpinBox, QMessageBox, QAbstractItemView, QListWidget,
-    QMenu, QCheckBox, QSystemTrayIcon, QFileDialog,
+    QListWidgetItem, QMenu, QCheckBox, QSystemTrayIcon, QFileDialog,
 )
 
 # ────────────────────────── 設定 ──────────────────────────
@@ -36,6 +36,7 @@ STOCK_DIR = BASE_DIR / "stock"       # 寫回股價的 Excel 固定放這裡，�
 ARCHIVE_DIR = STOCK_DIR / "history"  # 每日另存的「原檔名_最新股價_日期」放這裡
 ARCHIVE_TIME = dtime(14, 30)         # 每天幾點之後留存
 TWSE_API = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
+TWSE_NAME_API = "https://mis.twse.com.tw/stock/api/getStockNames.jsp"   # 用中文名稱查代號
 HTTP_TIMEOUT = 8
 
 # 更新排程：平日 09:00 ~ 14:00，每 30 分鐘一次（09:00、09:30 … 13:30、14:00）
@@ -63,6 +64,7 @@ DEFAULT_SETTINGS = {
     "excel_files": {},         # 要同步寫回股價的 Excel {路徑: {工作表: 股價欄, ...}}
     "excel_sources": {},       # stock 資料夾副本 → 原始檔案路徑（重新匯入用）
     "import_dir": "",          # 上次匯入的資料夾（重新匯入時會一併找新加入的 Excel）
+    "name_codes": {},          # Excel 只寫名稱時，查到的「名稱 → 代號」對照（存起來下次不用再查）
 }
 
 APP_STYLE = """
@@ -229,6 +231,7 @@ def normalize_code(value) -> str | None:
             return None
         value = int(value)
     code = str(value).strip().upper()
+    code = re.split(r"[\s\u3000]+", code)[0] if code else code   # 「2330 台積電」→ 2330
     code = re.sub(r"\.(TW|TWO)$", "", code)
     if code.isdigit() and len(code) < 4:
         code = code.zfill(4)
@@ -262,17 +265,32 @@ def _read_sheets(path: Path) -> list[tuple[str, list[list]]]:
     raise RuntimeError(f"不支援的檔案格式：{suffix}")
 
 
-def _find_code_column(rows: list[list]) -> tuple[int, int] | None:
+NAME_HEADERS = ("名稱", "股票", "個股", "證券", "標的", "name", "stock", "stock name")
+
+
+def _is_code_header(text: str) -> bool:
+    return any(h in text for h in CODE_HEADERS)
+
+
+def _is_name_header(text: str) -> bool:
+    """「股票名稱」「名稱」「標的」這類標題；避免把「XX持股表」之類的大標題誤判"""
+    text = text.strip().lower()
+    return (not _is_code_header(text) and text not in (PRICE_HEADER, PREV_HEADER)
+            and (text in NAME_HEADERS or text.endswith("名稱")))
+
+
+def _locate_columns(rows: list[list]) -> tuple[int | None, int | None, int] | None:
     """
-    找出股票代號那一欄，回傳 (欄索引, 資料起始列索引)。
-    1. 前 10 列內有「代號 / code」之類的標題 → 用那一欄
-    2. 沒有標題 → 選「看起來像代號」最多的那一欄
+    找出「股票代號欄」與「股票名稱欄」，回傳 (代號欄, 名稱欄, 資料起始列)；欄位不存在時為 None。
+    1. 前 10 列內有「代號 / 名稱」之類的標題 → 用標題判斷（可以只有名稱欄、沒有代號欄）
+    2. 沒有標題 → 選「看起來像代號」最多的那一欄當代號欄
     """
     for r, row in enumerate(rows[:10]):
-        for c, cell in enumerate(row):
-            text = str(cell or "").strip().lower()
-            if text and any(h in text for h in CODE_HEADERS):
-                return c, r + 1
+        texts = [str(cell or "").strip().lower() for cell in row]
+        code_col = next((c for c, t in enumerate(texts) if t and _is_code_header(t)), None)
+        name_col = next((c for c, t in enumerate(texts) if t and _is_name_header(t)), None)
+        if code_col is not None or name_col is not None:
+            return code_col, name_col, r + 1
     counts: dict[int, int] = {}
     for row in rows:
         for c, cell in enumerate(row):
@@ -281,7 +299,15 @@ def _find_code_column(rows: list[list]) -> tuple[int, int] | None:
     if not counts:
         return None
     best = max(counts.values())
-    return min(c for c, n in counts.items() if n == best), 0   # 同分取最左邊
+    return min(c for c, n in counts.items() if n == best), None, 0   # 同分取最左邊
+
+
+def _find_code_column(rows: list[list]) -> tuple[int, int] | None:
+    """（相容舊程式）只回傳代號欄與起始列"""
+    found = _locate_columns(rows)
+    if not found or found[0] is None:
+        return None
+    return found[0], found[2]
 
 
 # 代號以外，若 Excel 有下列標題的欄位，會順便讀進來（沒有就略過）
@@ -296,7 +322,7 @@ def _find_extra_columns(header: list) -> dict[str, tuple[int, int]]:
     found: dict[str, tuple[int, int]] = {}
     for c, cell in enumerate(header):
         text = str(cell or "").strip().lower()
-        if not text or any(h in text for h in CODE_HEADERS) or text == PRICE_HEADER:
+        if not text or _is_code_header(text) or _is_name_header(text) or text == PRICE_HEADER:
             continue
         for key, aliases in EXTRA_HEADERS.items():
             if key not in found and any(a in text for a in aliases):
@@ -305,36 +331,65 @@ def _find_extra_columns(header: list) -> dict[str, tuple[int, int]]:
     return found
 
 
-def read_stock_list(path: str | Path) -> tuple[dict[str, dict], list[str]]:
+# 名稱欄裡常見、但不是股票的字（不去查）
+SKIP_NAMES = {"小計", "合計", "總計", "總和", "加總", "備註", "說明", "現金", "總資產"}
+
+
+def read_stock_list(path: str | Path, resolver=None) -> tuple[dict[str, dict], list[str]]:
     """
-    從 Excel / CSV 讀出有股票代號的列（所有工作表）。
+    從 Excel / CSV 讀出有股票代號或股票名稱的列（所有工作表）。
     回傳 ({代號: {"shares": 股數或None, "cost": 成本或None}}, 說明訊息)。
-    沒有代號的列（標題、小計、備註…）一律略過；同代號重複時以後面為準。
+    - 有代號就用代號；沒有代號、只有名稱的列，交給 resolver(名稱清單) 查出代號
+    - 代號、名稱都沒有的列（標題、小計、備註…）一律略過；同代號重複時以後面為準
     """
     records: dict[str, dict] = {}
     notes: list[str] = []
+    pending: list[tuple[str, dict, str]] = []          # (名稱, 資料, 工作表)
+    counts: dict[str, int] = {}
+    extras: dict[str, dict] = {}
     for sheet, rows in _read_sheets(Path(path)):
-        found = _find_code_column(rows)
+        found = _locate_columns(rows)
         if not found:
             continue
-        col, start = found
+        code_col, name_col, start = found
         extra = _find_extra_columns(rows[start - 1]) if start else {}
-        count = 0
+        extras[sheet] = extra
         for row in rows[start:]:
-            code = normalize_code(row[col] if col < len(row) else None)
-            if not code:
-                continue
+            cell = lambda c: row[c] if c is not None and c < len(row) else None
             rec = {"shares": None, "cost": None}
             for key, (c, mult) in extra.items():
-                v = _to_float(row[c] if c < len(row) else None)
+                v = _to_float(cell(c))
                 rec[key] = v * mult if v is not None else None
+            code = normalize_code(cell(code_col))
+            if not code and name_col is not None:
+                name = str(cell(name_col) or "").strip()
+                if name and looks_like_code(name):
+                    code = normalize_code(name)
+                elif name and name not in SKIP_NAMES:
+                    pending.append((name, rec, sheet))
+                    continue
+            if not code:
+                continue
             records[code] = rec
-            count += 1
-        if count:
-            cols = "、".join({"shares": "股數", "cost": "成本"}[k] for k in extra)
-            notes.append(f"工作表「{sheet}」：{count} 檔" + (f"（含{cols}）" if cols else ""))
-    return records, notes
+            counts[sheet] = counts.get(sheet, 0) + 1
 
+    if pending:
+        names = list(dict.fromkeys(n for n, _, _ in pending))
+        mapping, unresolved = resolver(names) if resolver else ({}, {n: "" for n in names})
+        for name, rec, sheet in pending:
+            code = mapping.get(name)
+            if code:
+                records[code] = rec
+                counts[sheet] = counts.get(sheet, 0) + 1
+        if unresolved:
+            items = [f"{n}（{why}）" if why else n for n, why in list(unresolved.items())[:6]]
+            notes.append("⚠ 名稱無法確定代號（略過）：" + "、".join(items)
+                         + (" …" if len(unresolved) > 6 else ""))
+
+    for sheet, count in counts.items():
+        cols = "、".join({"shares": "股數", "cost": "成本"}[k] for k in extras.get(sheet, {}))
+        notes.insert(0, f"工作表「{sheet}」：{count} 檔" + (f"（含{cols}）" if cols else ""))
+    return records, notes
 
 
 # 頁籤名稱：檔名去掉下列開頭後剩下的部分
@@ -383,7 +438,8 @@ def prepare_excel_copy(src: str | Path) -> Path:
 
 
 def write_prices(path: str | Path, prices: dict[str, float | None],
-                 col_map: dict, roll_date: str | None = None) -> dict:
+                 col_map: dict, roll_date: str | None = None,
+                 names: dict[str, str] | None = None) -> dict:
     """
     只在「有股票代號的列」寫入最新股價，其他儲存格一律不動（不插入列、不改格式）。
     - 有標題列：在最右邊新增「最新股價」欄（已有就沿用）
@@ -402,11 +458,13 @@ def write_prices(path: str | Path, prices: dict[str, float | None],
     do_roll = bool(roll_date) and col_map.get(ROLLED_KEY) != roll_date
     for ws in wb.worksheets:
         rows = [[c.value for c in row] for row in ws.iter_rows()]
-        found = _find_code_column(rows)
+        found = _locate_columns(rows)
         if not found:
             continue
-        col, start = found
-        code_col = col + 1                            # openpyxl 是 1-based；start>0 時 start 就是標題列
+        col, ncol, start = found
+        code_col = col + 1 if col is not None else None      # openpyxl 是 1-based；start>0 時 start 就是標題列
+        name_col = ncol + 1 if ncol is not None else None
+        key_col = max(code_col or 0, name_col or 0)
 
         price_col = col_map.get(ws.title)
         if not price_col and start:
@@ -416,7 +474,7 @@ def write_prices(path: str | Path, prices: dict[str, float | None],
                     break
         created = False
         if not price_col:
-            price_col = max(ws.max_column, code_col) + 1
+            price_col = max(ws.max_column, key_col) + 1
             created = True                            # 第一次寫入，還沒有舊價可滾
             if start:
                 ws.cell(start, price_col, PRICE_HEADER)
@@ -432,15 +490,17 @@ def write_prices(path: str | Path, prices: dict[str, float | None],
                         prev_col = c
                         break
             if not prev_col:
-                prev_col = max(ws.max_column, code_col, price_col) + 1
+                prev_col = max(ws.max_column, key_col, price_col) + 1
                 if start:
                     ws.cell(start, prev_col, PREV_HEADER)
             col_map[key] = prev_col
 
         for r in range(start + 1, ws.max_row + 1):
-            code = normalize_code(ws.cell(r, code_col).value)
+            code = normalize_code(ws.cell(r, code_col).value) if code_col else None
+            if not code and name_col and names:       # 只寫名稱的列 → 用查到的代號對照
+                code = names.get(str(ws.cell(r, name_col).value or "").strip())
             if not code:
-                continue                              # 沒有股票代號的列不碰
+                continue                              # 沒有股票代號 / 名稱的列不碰
             if prev_col:
                 old = ws.cell(r, price_col).value
                 if old is not None:                   # 沒有舊價就保留原本的前次股價
@@ -482,7 +542,7 @@ def write_template(path: str | Path) -> None:
     ws.column_dimensions["A"].width = 14
     for row in ws.iter_rows(min_row=2, max_row=500, max_col=1):
         row[0].number_format = "@"                    # 代號欄設為文字，0050 才不會變 50
-    ws["C1"] = "說明：只會讀取「股票代號」這一欄，其他欄位會被忽略。名稱與價格由程式自動向證交所抓取。"
+    ws["C1"] = "說明：填「股票代號」或「股票名稱」其中一欄即可（只寫名稱也行，程式會自動查代號）。價格由程式自動向證交所抓取。"
     wb.save(path)
 
 
@@ -587,6 +647,104 @@ def _fetch_batch(codes: list[str]) -> dict[str, dict]:
     return result
 
 
+# ────────────────────────── 用名稱查代號 ──────────────────────────
+MARKET_NAMES = {"tse": "上市", "otc": "上櫃"}
+
+
+def looks_like_code(text: str) -> bool:
+    """2330、0050、00679B、2882B 這類是代號；含中文就當成名稱"""
+    return bool(CODE_RE.match(text.strip().upper()))
+
+
+def _is_stock_or_etf(code: str) -> bool:
+    """
+    名稱搜尋會連權證、可轉債一起回傳（例如「台積電凱基67售14」），只保留：
+    4 碼股票、00 開頭的 ETF、4 碼 + 英文字母的特別股（例如 2882B）
+    """
+    if len(code) == 4:
+        return True
+    if code.startswith("00"):
+        return True
+    return len(code) == 5 and code[:4].isdigit() and code[4].isalpha()
+
+
+def _query_names(keyword: str) -> list[dict]:
+    query = urllib.parse.urlencode({"n": keyword, "_": int(time.time() * 1000)})
+    req = urllib.request.Request(
+        f"{TWSE_NAME_API}?{query}",
+        headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+            "Referer": "https://mis.twse.com.tw/stock/index.jsp",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+        payload = json.loads(resp.read().decode("utf-8"))
+    return payload.get("datas") or []
+
+
+def search_stocks(keyword: str, limit: int = 30) -> list[dict]:
+    """
+    用中文名稱（可以只打一部分，例如「積電」「環球」）查股票代號。
+    回傳 [{"code", "name", "market"}]，名稱完全相同的排最前面，其次是開頭相同的。
+    """
+    keyword = keyword.strip()
+    if not keyword:
+        return []
+    rows = _query_names(keyword)
+    if not rows and len(keyword) > 2:
+        # 證交所對某些較長的關鍵字會回傳空結果（例如「元大台灣」），
+        # 改用前兩個字查，再自己篩出名稱包含完整關鍵字的
+        rows = [r for r in _query_names(keyword[:2]) if keyword in r.get("n", "")]
+
+    results, seen = [], set()
+    for r in rows:
+        code, name = r.get("c", ""), r.get("n", "")
+        if not code or code in seen or not _is_stock_or_etf(code):
+            continue
+        seen.add(code)
+        market = MARKET_NAMES.get(str(r.get("key", "")).split("_")[0], "")
+        results.append({"code": code, "name": name, "market": market})
+
+    results.sort(key=lambda r: (r["name"] != keyword,              # 完全相同
+                                not r["name"].startswith(keyword),  # 開頭相同
+                                len(r["code"]), r["code"]))
+    return results[:limit]
+
+
+NAME_CODE_CACHE: dict[str, str] = {}      # 名稱 → 代號（主視窗啟動時從設定載入）
+
+
+def resolve_names(names: list[str]) -> tuple[dict[str, str], dict[str, str]]:
+    """
+    把 Excel 裡的股票名稱換成代號。回傳 (名稱→代號, 無法確定的名稱→原因)。
+    規則：名稱完全相同的優先；只查到一筆也採用；查到多筆又沒有完全相同的 → 無法確定。
+    """
+    mapping: dict[str, str] = {}
+    unresolved: dict[str, str] = {}
+    for raw in names:
+        name = raw.strip()
+        if name in NAME_CODE_CACHE:
+            mapping[raw] = NAME_CODE_CACHE[name]
+            continue
+        try:
+            results = search_stocks(name)
+            alt = name.replace("臺", "台")
+            if not results and alt != name:                # 「臺積電」→「台積電」再查一次
+                results = search_stocks(alt)
+        except Exception as exc:
+            unresolved[raw] = f"連線失敗：{str(exc)[:30]}"
+            continue
+        exact = [r for r in results if r["name"] in (name, name.replace("臺", "台"))]
+        pick = exact[0] if exact else (results[0] if len(results) == 1 else None)
+        if pick:
+            mapping[raw] = NAME_CODE_CACHE[name] = pick["code"]
+        elif results:
+            unresolved[raw] = "可能是 " + "、".join(f"{r['name']} {r['code']}" for r in results[:3])
+        else:
+            unresolved[raw] = "查無此名稱"
+    return mapping, unresolved
+
+
 class _Signals(QObject):
     # 第一個參數是「第幾次更新」，用來忽略逾時被取消後才遲到的舊結果
     done = pyqtSignal(int, dict)
@@ -630,27 +788,38 @@ def make_icon() -> QIcon:
 # ────────────────────────── 新增 / 編輯對話框 ──────────────────────────
 class StockDialog(QDialog):
 
-    def __init__(self, parent=None, stock: Stock | None = None):
+    def __init__(self, parent=None, stock: Stock | None = None, initial: str = ""):
         super().__init__(parent)
         self.editing = stock is not None
         self.setWindowTitle("編輯監控股票" if self.editing else "新增監控股票")
-        self.setMinimumWidth(360)
+        self.setMinimumWidth(400)
 
         form = QFormLayout(self)
 
+        # 可輸入代號或中文名稱
         self.code = QLineEdit()
-        self.code.setPlaceholderText("例如 2330、0050、6488")
-        lookup = QPushButton("查詢")
-        lookup.clicked.connect(self._lookup)
+        self.code.setPlaceholderText("輸入代號或名稱，例如 2330、台積電、環球晶")
+        self.lookup_btn = QPushButton("查詢")
+        self.lookup_btn.clicked.connect(self._lookup)
         self.code.returnPressed.connect(self._lookup)
+        self.code.textEdited.connect(lambda *_: self.matches.hide())
         code_row = QHBoxLayout()
         code_row.addWidget(self.code)
-        code_row.addWidget(lookup)
+        code_row.addWidget(self.lookup_btn)
+
+        # 用名稱查到多筆時，列出來讓使用者挑
+        self.matches = QListWidget()
+        self.matches.setFixedHeight(150)
+        self.matches.hide()
+        self.matches.itemClicked.connect(self._pick_match)
+        self.matches.itemActivated.connect(self._pick_match)
 
         self.name = QLineEdit()
-        self.name.setPlaceholderText("按「查詢」自動帶入")
+        self.name.setPlaceholderText("可直接輸入名稱後按 Enter，例如 台積電")
+        self.name.returnPressed.connect(self._lookup_from_name)
         self.hint = QLabel("")
         self.hint.setObjectName("muted")
+        self.hint.setWordWrap(True)
 
         self.cost = self._money_box()
         self.shares = QSpinBox()
@@ -660,7 +829,8 @@ class StockDialog(QDialog):
         self.take = self._money_box(optional=True)
         self.buy = self._money_box(optional=True)
 
-        form.addRow("股票代號", code_row)
+        form.addRow("代號 / 名稱", code_row)
+        form.addRow("", self.matches)
         form.addRow("股票名稱", self.name)
         form.addRow("", self.hint)
         form.addRow("成本均價", self.cost)
@@ -672,7 +842,9 @@ class StockDialog(QDialog):
         cancel = QPushButton("取消")
         save = QPushButton("儲存" if self.editing else "新增")
         save.setObjectName("primary")
-        save.setDefault(True)
+        save.setAutoDefault(False)              # Enter 留給「查詢」，不會直接按到新增
+        cancel.setAutoDefault(False)
+        self.lookup_btn.setAutoDefault(False)
         cancel.clicked.connect(self.reject)
         save.clicked.connect(self._try_accept)
         buttons.addStretch()
@@ -683,7 +855,7 @@ class StockDialog(QDialog):
         if stock:
             self.code.setText(stock.code)
             self.code.setReadOnly(True)
-            lookup.setEnabled(False)
+            self.lookup_btn.setEnabled(False)
             self.name.setText(stock.name)
             self.cost.setValue(stock.cost)
             self.shares.setValue(stock.shares)
@@ -691,6 +863,9 @@ class StockDialog(QDialog):
             self.buy.setValue(stock.buy or 0)
         else:
             self.shares.setValue(1000)
+            if initial:                                     # 從主畫面搜尋框帶過來 → 自動查詢
+                self.code.setText(initial.strip())
+                QTimer.singleShot(0, self._lookup)
 
     @staticmethod
     def _money_box(optional: bool = False) -> QDoubleSpinBox:
@@ -704,9 +879,59 @@ class StockDialog(QDialog):
         return box
 
     def _lookup(self):
-        code = self.code.text().strip().upper()
-        if not code:
+        """輸入的是代號就直接查行情；是中文名稱就先查出代號"""
+        text = self.code.text().strip()
+        if not text or self.editing:
             return
+        if looks_like_code(text):
+            self.matches.hide()
+            self._lookup_code(text.upper())
+        else:
+            self._lookup_name(text)
+
+    def _lookup_from_name(self):
+        """在「股票名稱」欄輸入名稱後按 Enter，也能查代號"""
+        text = self.name.text().strip()
+        if not text or self.editing:
+            return
+        self.code.setText(text)
+        self._lookup()
+
+    def _lookup_name(self, keyword: str):
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            results = search_stocks(keyword)
+        except Exception as exc:
+            self.hint.setText(f"名稱查詢失敗：{exc}（可改輸入股票代號）")
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        if not results:
+            self.matches.hide()
+            self.hint.setText(f"找不到名稱含「{keyword}」的上市 / 上櫃股票或 ETF")
+            return
+        if len(results) == 1:                   # 只有一筆就直接帶入
+            self.matches.hide()
+            self._lookup_code(results[0]["code"])
+            return
+
+        self.matches.clear()
+        for r in results:
+            label = f"{r['code']}　{r['name']}" + (f"（{r['market']}）" if r["market"] else "")
+            item = QListWidgetItem(label)
+            item.setData(Qt.ItemDataRole.UserRole, r["code"])
+            self.matches.addItem(item)
+        self.matches.setCurrentRow(0)
+        self.matches.show()
+        self.matches.setFocus()
+        self.hint.setText(f"找到 {len(results)} 筆，請點選一檔（或用方向鍵 + Enter）")
+
+    def _pick_match(self, item: QListWidgetItem):
+        self.matches.hide()
+        self._lookup_code(item.data(Qt.ItemDataRole.UserRole))
+
+    def _lookup_code(self, code: str):
         self.code.setText(code)
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
@@ -724,14 +949,21 @@ class StockDialog(QDialog):
         self.name.setText(quote["name"])
         price = quote["price"]
         if price:
-            self.hint.setText(f"目前價格 {price:,.2f}")
+            self.hint.setText(f"{code} {quote['name']}　目前價格 {price:,.2f}")
             # 新增時成本預設帶入現價；停利 / 低接為選填，預設留空
             if not self.editing and self.cost.value() == 0:
                 self.cost.setValue(price)
 
     def _try_accept(self):
-        if not self.code.text().strip() or not self.name.text().strip():
-            QMessageBox.warning(self, "資料不足", "請輸入股票代號並按「查詢」帶入名稱。")
+        text = self.code.text().strip()
+        if not text and self.name.text().strip() and not self.editing:
+            self._lookup_from_name()             # 只填了名稱 → 先用名稱查代號
+            return
+        if text and not looks_like_code(text):
+            self._lookup()                       # 打了名稱還沒查 → 先查，讓使用者選定代號
+            return
+        if not text or not self.name.text().strip():
+            QMessageBox.warning(self, "資料不足", "請輸入股票代號或名稱，並按「查詢」帶入。")
             return
         self.accept()
 
@@ -781,6 +1013,7 @@ class StockMonitor(QMainWindow):
 
         for s in self.stocks:                     # 舊資料的清單名稱也套用去開頭規則
             s.group = tab_name(s.group) if s.group else ""
+        NAME_CODE_CACHE.update(self.settings.get("name_codes") or {})   # 之前查過的名稱 → 代號
         self._restore_quotes()
         self._build_ui()
         self._build_tray()
@@ -927,9 +1160,10 @@ class StockMonitor(QMainWindow):
         row.addWidget(QLabel("我的監控清單", objectName="sectionTitle"))
         row.addStretch()
         self.search = QLineEdit()
-        self.search.setPlaceholderText("搜尋名稱或代號...")
-        self.search.setFixedWidth(210)
+        self.search.setPlaceholderText("搜尋名稱或代號，按 Enter 新增")
+        self.search.setFixedWidth(240)
         self.search.textChanged.connect(self._filter_table)
+        self.search.returnPressed.connect(self._search_enter)
         row.addWidget(self.search)
 
         edit_btn = QPushButton("編輯")
@@ -996,7 +1230,7 @@ class StockMonitor(QMainWindow):
             "資料來源：臺灣證券交易所基本市況報導網站，可能有數秒延遲，僅供參考。",
             objectName="muted"))
         footer.addStretch()
-        footer.addWidget(QLabel("STOCK MONITOR • v0.15", objectName="muted"))
+        footer.addWidget(QLabel("STOCK MONITOR • v0.18", objectName="muted"))
         main.addLayout(footer)
         return content
 
@@ -1499,14 +1733,22 @@ class StockMonitor(QMainWindow):
         股數 / 成本 / 損益各自計算。重新匯入同一份時，以 Excel 內容為準（Excel 刪掉的代號會移除）。
         """
         parsed, errors, used = [], [], set()
-        for p in paths:
-            try:
-                records, notes = read_stock_list(p)
-            except Exception as exc:
-                errors.append(f"{Path(p).name}：{exc}")
-                continue
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)   # 只寫名稱的列要上網查代號
+        try:
+            read = []
+            for p in paths:
+                try:
+                    read.append((p, *read_stock_list(p, resolver=resolve_names)))
+                except Exception as exc:
+                    errors.append(f"{Path(p).name}：{exc}")
+        finally:
+            QApplication.restoreOverrideCursor()
+        self.settings["name_codes"] = dict(NAME_CODE_CACHE)        # 查過的名稱存起來
+        self._save()
+        for p, records, notes in read:
             if not records:
-                errors.append(f"{Path(p).name}：找不到股票代號")
+                warn = "；".join(n for n in notes if n.startswith("⚠"))
+                errors.append(f"{Path(p).name}：找不到股票代號或名稱" + (f"（{warn}）" if warn else ""))
                 continue
             group = tab_name(p)
             if group in used:                                  # 兩個檔去掉開頭後同名
@@ -1545,6 +1787,9 @@ class StockMonitor(QMainWindow):
                 line += f"、移除 {len(removed)}（Excel 已刪除）"
             if skipped:
                 line += f"\n　　查無代號略過：{'、'.join(skipped[:6])}"
+            for n in notes:
+                if n.startswith("⚠"):
+                    line += f"\n　　{n}"
             lines.append(line)
 
         msg = f"共 {len(parsed)} 個 Excel，每個 Excel 各自一份清單：\n\n" + "\n".join(lines)
@@ -1636,7 +1881,7 @@ class StockMonitor(QMainWindow):
                 del files[f]
                 continue
             try:
-                files[f] = write_prices(path, prices, files[f], roll_date)
+                files[f] = write_prices(path, prices, files[f], roll_date, names=NAME_CODE_CACHE)
             except PermissionError:
                 busy.append(path.name)                # Excel 正開著這個檔，下次再寫（也下次再滾動）
             except Exception as exc:
@@ -1723,11 +1968,23 @@ class StockMonitor(QMainWindow):
     def _find(self, group: str, code: str) -> Stock | None:
         return next((s for s in self.stocks if s.group == group and s.code == code), None)
 
-    def _add_stock(self):
+    def _search_enter(self):
+        """搜尋框按 Enter：清單裡找不到 → 開新增視窗並用這個名稱 / 代號自動查詢"""
+        text = self.search.text().strip()
+        if not text:
+            return
+        visible = [r for r in range(self.table.rowCount()) if not self.table.isRowHidden(r)]
+        if visible:
+            self.table.selectRow(visible[0])
+            return
+        self._add_stock(initial=text)
+        self.search.clear()
+
+    def _add_stock(self, initial: str = ""):
         """新增到目前選的清單；選「全部」時放進「手動新增」"""
         current = self._current_group()
         group = "" if current in (self.ALL, self.MANUAL) else current
-        dialog = StockDialog(self)
+        dialog = StockDialog(self, initial=initial if isinstance(initial, str) else "")
         dialog.setWindowTitle(f"新增監控股票 → {group or '手動新增'}")
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
