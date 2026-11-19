@@ -98,32 +98,57 @@
 
 ### 1. 下載專案
 
-```bash
-git clone https://github.com/royee0503/Python-Taiwan-Stock-Scrape
+```powershell
+git clone https://github.com/royee0503/Taiwan-Stock-Monitor.git
 ```
 
 ### 2. 進入專案資料夾
 
-```bash
-cd Python-Taiwan-Stock-Scrape
+```powershell
+cd Taiwan-Stock-Monitor
 ```
 
-### 3. 安裝必要套件
+### 3. 建立並啟用虛擬環境
 
-```bash
-pip install PyQt6 openpyxl
+在專案資料夾中建立 Python 虛擬環境：
+
+```powershell
+python -m venv .venv
+.\\.venv\\Scripts\\Activate.ps1
 ```
 
-### 4. 執行程式
+如果啟用時出現「因為這個系統上已停用指令碼執行」的錯誤，可以只針對目前 PowerShell 工作階段調整執行原則，再重新啟用：
 
-```bash
-python Python_Stock_Monitor.py
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned
+.\\.venv\\Scripts\\Activate.ps1
+```
+
+確認 Python 確實使用專案自己的虛擬環境：
+
+```powershell
+python --version
+where.exe python
+```
+
+`where.exe python` 顯示的第一個路徑應位於專案的 `.venv\\Scripts\\` 資料夾中。
+
+### 4. 安裝必要套件
+
+```powershell
+python -m pip install PyQt6 openpyxl
+```
+
+### 5. 執行程式
+
+```powershell
+python .\\Stock_windows\\Taiwan_Stock_Monitor.py
 ```
 
 若要直接在背景啟動（不開主視窗），可以使用：
 
-```bash
-pythonw Python_Stock_Monitor.py --minimized
+```powershell
+pythonw .\\Stock_windows\\Taiwan_Stock_Monitor.py --minimized
 ```
 
 ## 打包成 exe
