@@ -8,7 +8,7 @@
 
 ### 行情與監控清單
 - **行情查詢**：支援上市、上櫃股票及 ETF，資料來自臺灣證券交易所基本市況報導網站。
-- **新增股票**：輸入代號後按「查詢」，自動帶入股票名稱與目前價格。
+- **新增股票**：輸入股票代號或名稱後按「查詢」，可依名稱搜尋股票，並自動帶入股票代號、名稱與目前價格。
 - **編輯與刪除**：雙擊表格可編輯；按 Delete 鍵或右鍵選單可刪除，可一次選取多檔。
 - **搜尋**：依股票名稱或代號篩選清單。
 - **排序**：清單依未實現損益由大到小排列；沒有填股數的觀察股排在後面。
@@ -33,9 +33,9 @@
 
 ### Excel 匯入
 - **匯入方式**：可匯入單一檔案、一次多選，或匯入整個資料夾；也可以直接把檔案或資料夾拖進視窗。
-- **讀取內容**：只讀取有股票代號的列；標題、空白列、小計等沒有代號的列會自動略過。
+- **讀取內容**：可使用股票代號或股票名稱辨識資料；只有名稱時，程式會查詢對應代號。標題、空白列、小計等非股票資料會自動略過。
 - **股數與成本**：Excel 若有股數、成本欄位會一併讀入；標題寫「張數」時，會自動乘以 1000 換算成股數。
-- **代號確認**：匯入前會先向證交所確認代號存在，查不到的代號會略過並列出。
+- **代號確認**：匯入前會向證交所確認代號；只有股票名稱的資料會先查詢對應代號，無法辨識的資料會略過並列出。
 - **重新匯入**：Excel 內容修改後，可用「重新匯入」更新股數與成本；Excel 裡刪掉的股票會一併移除，資料夾中新加入的 Excel 也會被讀入。
 
 ### 股價寫回 Excel
@@ -61,7 +61,7 @@
 
 ## Excel 格式說明
 
-只有「股票代號」欄是必要的，其他欄位可有可無。範例：
+「股票代號」或「股票名稱」至少需要有一欄可供辨識，股數、成本等欄位皆可省略。若只有股票名稱，程式會嘗試查詢對應代號。範例：
 
 | 股票代號 | 股票名稱 | 股數 | 成本均價 | 備註 |
 |---|---|---|---|---|
@@ -70,6 +70,7 @@
 | 6488 | 環球晶 | | | 觀察中 |
 
 - **代號欄**：標題含「代號」、「代碼」、「code」等字樣即可辨識。沒有標題列時，程式會自動找出最像股票代號的那一欄。
+- **名稱欄**：標題含「名稱」、「股票名稱」等字樣即可辨識；若該列沒有代號，會依名稱查詢對應代號。
 - **股數欄**：標題含「股數」、「庫存」、「持股」、「張數」等字樣即可辨識。
 - **成本欄**：標題含「成本」、「均價」、「買價」等字樣即可辨識。成本留空時，以第一次抓到的價格代入。
 - **代號格式**：Excel 把 `0050` 顯示成 `50`，或代號寫成 `2330.TW`，程式都會自動修正。
@@ -114,14 +115,14 @@ cd Taiwan-Stock-Monitor
 
 ```powershell
 python -m venv .venv
-.\\.venv\\Scripts\\Activate.ps1
+.\.venv\Scripts\Activate.ps1
 ```
 
 如果啟用時出現「因為這個系統上已停用指令碼執行」的錯誤，可以只針對目前 PowerShell 工作階段調整執行原則，再重新啟用：
 
 ```powershell
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned
-.\\.venv\\Scripts\\Activate.ps1
+.\.venv\Scripts\Activate.ps1
 ```
 
 確認 Python 確實使用專案自己的虛擬環境：
@@ -131,7 +132,7 @@ python --version
 where.exe python
 ```
 
-`where.exe python` 顯示的第一個路徑應位於專案的 `.venv\\Scripts\\` 資料夾中。
+`where.exe python` 顯示的第一個路徑應位於專案的 `.venv\Scripts\` 資料夾中。
 
 ### 4. 安裝必要套件
 
@@ -142,13 +143,13 @@ python -m pip install PyQt6 openpyxl
 ### 5. 執行程式
 
 ```powershell
-python .\\Stock_windows\\Taiwan_Stock_Monitor.py
+python .\Stock_windows\Taiwan_Stock_Monitor.py
 ```
 
 若要直接在背景啟動（不開主視窗），可以使用：
 
 ```powershell
-pythonw .\\Stock_windows\\Taiwan_Stock_Monitor.py --minimized
+pythonw .\Stock_windows\Taiwan_Stock_Monitor.py --minimized
 ```
 
 ## 打包成 exe
@@ -220,7 +221,7 @@ A：剛開盤時部分股票可能還沒有成交，程式會先顯示昨天的�
 
 ## License
 
-本專案採用 [AGPL-3.0 License](https://github.com/royee0503/Python-Taiwan-Stock-Scrape?tab=AGPL-3.0-1-ov-file#) 授權。
+本專案採用 [AGPL-3.0 License](https://github.com/royee0503/Taiwan-Stock-Monitor/blob/main/LICENSE) 授權。
 
 使用者可以依照 AGPL-3.0 的條款使用、修改及散布本專案程式碼。若散布修改後的版本，或透過網路提供服務給他人使用，必須依相同授權公開對應的原始碼。
 
